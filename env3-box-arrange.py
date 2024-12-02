@@ -10,6 +10,7 @@ import copy
 import numpy as np
 import shutil
 import time
+from new_St_plan import calculate_agent_utility, generate_initial_plan, simulate_follower_responses, optimize_plan_based_on_responses
 
 # cen_decen_framework = 'DMAS', 'HMAS-1', 'CMAS', 'HMAS-2'
 # dialogue_history_method = '_w_all_dialogue_history', '_wo_any_dialogue_history', '_w_only_state_action_history', '_w_compressed_dialogue_history', '_w_previous_round_history'
@@ -43,6 +44,7 @@ def run_exp(Saving_path, pg_row_num, iteration_num, query_time_limit, dialogue_h
   dialogue_history_list = []
   left_box_list = []
   token_num_count_list = []
+  response = None
   pg_state_list.append(pg_dict)
   with open(Saving_path_result+'/pg_state' + '/pg_state'+str(1)+'.json', 'w') as f:
     json.dump(pg_dict, f)
@@ -50,93 +52,64 @@ def run_exp(Saving_path, pg_row_num, iteration_num, query_time_limit, dialogue_h
   ### Start the Game! Query LLM for response
   print(f'query_time_limit: {query_time_limit}')
   for index_query_times in range(query_time_limit): # The upper limit of calling LLMs
-    state_update_prompt, left_box = state_update_func(pg_dict, lifter_weight_list)
-    left_box_list.append(left_box)
-    if cen_decen_framework in ('DMAS'):
-      print('--------DMAS method starts--------')
-      match = None
-      count_round = 0
-      dialogue_history = ''
-      response = '{}'
-      while not match and count_round <= 3:
-        count_round += 1
-        state_update_prompt_local_agent, state_update_prompt_other_agent = state_update_func_local_agent(
-                                                                                                         local_agent_row_i,
-                                                                                                         pg_dict)
-        user_prompt_1 = input_prompt_local_agent_DMAS_dialogue_func(state_update_prompt_local_agent,
-                                                                     state_update_prompt_other_agent,
-                                                                     dialogue_history, response_total_list,
-                                                                     pg_state_list, dialogue_history_list,
-                                                                     dialogue_history_method)
-        user_prompt_list.append(user_prompt_1)
-        with open(Saving_path_result + '/prompt' + '/user_prompt_' + str(index_query_times + 1), 'w') as f:
-          f.write(user_prompt_list[-1])
-        messages = message_construct_func([user_prompt_1], [], '_w_all_dialogue_history')
-        initial_response, token_num_count = GPT_response(messages, model_name)
-        token_num_count_list.append(token_num_count)
 
-        dialogue_history += f'[Agent[{local_agent_row_i}]: {initial_response}]\n\n'
-        #print(dialogue_history)
-        if re.search(r'EXECUTE', initial_response):
-          # Search for the pattern that starts with { and ends with }
-          print('EXECUTE!')
-          match = re.search(r'{.*}', initial_response, re.DOTALL)
-          if match:
-            response = match.group()
-            response, token_num_count_list_add = with_action_syntactic_check_func(pg_dict, response,
-                                                                                  [user_prompt_list[-1]],
-                                                                                  [],
-                                                                                  model_name,
-                                                                                  '_w_all_dialogue_history')
-            token_num_count_list = token_num_count_list + token_num_count_list_add
-            print(f'response: {response}')
-            #print(f'User prompt: {user_prompt_1}\n\n')
-          break
-          break
-      dialogue_history_list.append(dialogue_history)
-    else:
-      if cen_decen_framework in ('CMAS', 'HMAS-1', 'HMAS-1-fast', 'HMAS-2'):
-        user_prompt_1 = input_prompt_1_func_total(state_update_prompt, response_total_list,
+    state_update_prompt, left_box = state_update_func(pg_dict, lifter_weight_list)
+    # 使用 Stackelberg 博弈生成初步任务分配计划
+    initial_plan = generate_initial_plan(pg_dict, lifter_weight_list)
+    print(f"Initial Plan: {initial_plan}")
+    left_box_list.append(left_box)
+    # 模拟代理对任务分配计划的反馈
+    predicted_responses = simulate_follower_responses(initial_plan, lifter_weight_list)
+    print(f"Predicted Responses: {predicted_responses}")
+
+    user_prompt_1 = input_prompt_1_func_total(state_update_prompt, response_total_list,
                                   left_box_list, dialogue_history_list, env_act_feedback_list,
                                   dialogue_history_method, cen_decen_framework)
-        user_prompt_list.append(user_prompt_1)
+    # user_prompt_1 = input_prompt_1_func_total(state_update_prompt, response_total_list,
+    #                               left_box_list, dialogue_history_list, env_act_feedback_list,
+    #                               dialogue_history_method, cen_decen_framework)
+    user_prompt_list.append(user_prompt_1)
         #print('user_prompt_1: ', user_prompt_1)
-        messages = message_construct_func([user_prompt_1], [], '_w_all_dialogue_history') # message construction
+    # 优化任务分配计划
+    optimized_plan = optimize_plan_based_on_responses(initial_plan, predicted_responses, lifter_weight_list)
+    print(f"Optimized Plan: {optimized_plan}")
 
-      with open(Saving_path_result+'/prompt' + '/user_prompt_'+str(index_query_times+1), 'w') as f:
+    messages = message_construct_func([user_prompt_1], [], '_w_all_dialogue_history') # message construction
+    
+    with open(Saving_path_result+'/prompt' + '/user_prompt_'+str(index_query_times+1), 'w') as f:
         f.write(user_prompt_list[-1])
-      initial_response, token_num_count = GPT_response(messages, model_name)
-      print('Initial response: ', initial_response)
-      token_num_count_list.append(token_num_count)
-      match = re.search(r'{.*}', initial_response, re.DOTALL)
-      if match:
-        response = match.group()
-        if response[0] == '{' and response[-1] == '}':
-          if '{' in response[1:-1] and '}' in response[1:-1]:
-            match = re.search(r'{.*}', response[:-1], re.DOTALL)
-            if match:
-              response = match.group()
-          print(f'response: {response}')
-          print('----------------Start syntactic check--------------')
-          response, token_num_count_list_add = with_action_syntactic_check_func(pg_dict, response, [user_prompt_1], [], model_name, '_w_all_dialogue_history')
-          token_num_count_list = token_num_count_list + token_num_count_list_add
-          print(f'response: {response}')
-        else:
+    initial_response, token_num_count = GPT_response(messages, model_name)
+    print('Initial response: ', initial_response)
+    token_num_count_list.append(token_num_count)
+    match = re.search(r'{.*}', initial_response, re.DOTALL)
+    if match:
+      response = match.group()
+      if response[0] == '{' and response[-1] == '}':
+        if '{' in response[1:-1] and '}' in response[1:-1]:
+          match = re.search(r'{.*}', response[:-1], re.DOTALL)
+          if match:
+            response = match.group()
+        print(f'response: {response}')
+        print('----------------Start syntactic check--------------')
+        response, token_num_count_list_add = with_action_syntactic_check_func(pg_dict, response, [user_prompt_1], [], model_name, '_w_all_dialogue_history')
+        token_num_count_list = token_num_count_list + token_num_count_list_add
+        print(f'response: {response}')
+      else:
           raise ValueError(f'Response format error: {response}')
 
-      if response == 'Out of tokens':
-        success_failure = 'failure over token length limit'
-        return user_prompt_list, response_total_list, pg_state_list, success_failure, index_query_times, token_num_count_list, Saving_path_result
-      elif response == 'Syntactic Error':
-        success_failure = 'Syntactic Error'
-        return user_prompt_list, response_total_list, pg_state_list, success_failure, index_query_times, token_num_count_list, Saving_path_result
+    if response == 'Out of tokens':
+      success_failure = 'failure over token length limit'
+      return user_prompt_list, response_total_list, pg_state_list, success_failure, index_query_times, token_num_count_list, Saving_path_result
+    elif response == 'Syntactic Error':
+      success_failure = 'Syntactic Error'
+      return user_prompt_list, response_total_list, pg_state_list, success_failure, index_query_times, token_num_count_list, Saving_path_result
 
       # Local agent response for checking the feasibility of actions
-      if cen_decen_framework == 'HMAS-2':
-        print('--------HMAS-2 method starts--------')
-        break_mark = False; count_round_HMAS2 = 0
+    
+    print('--------HMAS-2 method starts--------')
+    break_mark = False; count_round_HMAS2 = 0
 
-        while break_mark == False and count_round_HMAS2 < 3:
+    while break_mark == False and count_round_HMAS2 < 3:
           count_round_HMAS2 += 1
           dialogue_history = f'Central Planner: {response}\n'
           prompt_list_dir = {}; response_list_dir = {}; local_agent_response_list_dir = {}
@@ -158,7 +131,7 @@ def run_exp(Saving_path, pg_row_num, iteration_num, query_time_limit, dialogue_h
                                                                             env_act_feedback_list,
                                                                             dialogue_history_method)
 
-              # print(local_reprompt)
+              print('The local reprompt is',local_reprompt)
               prompt_list_dir[f'Agent[{lift_weight_item}W]'].append(local_reprompt)
               messages = message_construct_func(
                 prompt_list_dir[f'Agent[{lift_weight_item}W]'],
@@ -188,67 +161,7 @@ def run_exp(Saving_path, pg_row_num, iteration_num, query_time_limit, dialogue_h
               break_mark = True
               pass
 
-        dialogue_history_list.append(dialogue_history)
-
-      elif cen_decen_framework == 'HMAS-1' or cen_decen_framework == 'HMAS-1-fast':
-        print('--------HMAS-1 method starts--------')
-        count_round = 0
-        dialogue_history = f'Central Planner: {response}\n'
-        match = None
-        while not match and count_round <= 3:
-          count_round += 1
-
-          agent_dict = json.loads(response)
-          lift_weight_list_total = []
-          for key, value in agent_dict.items():
-            lift_weight_list_total += [float(num) for num in re.findall(r'(\d+\.\d+)', value)]
-
-          for lift_weight_item in lifter_weight_list:
-
-            if count_round >= 2 and cen_decen_framework == 'HMAS-1-fast':
-              user_prompt_1 = input_prompt_local_agent_HMAS1_dialogue_fast_plan_func(state_update_prompt_local_agent,
-                                                                           state_update_prompt_other_agent,
-                                                                           dialogue_history, response_total_list, pg_state_list,
-                                                                           dialogue_history_list, dialogue_history_method,
-                                                                           initial_plan=response)
-            else:
-              #user_prompt_1 = input_prompt_local_agent_HMAS1_dialogue_func(state_update_prompt_local_agent,
-              #                                             state_update_prompt_other_agent, dialogue_history,
-              #                                             response_total_list, pg_state_list,
-              #                                             dialogue_history_list, dialogue_history_method,
-              #                                             initial_plan='')
-
-              user_prompt_1 = input_prompt_local_agent_HMAS2_dialogue_func(lift_weight_item, state_update_prompt, response,
-                                                                            response_total_list, pg_state_list,
-                                                                            dialogue_history_list,
-                                                                            env_act_feedback_list,
-                                                                            dialogue_history_method)
-
-
-            user_prompt_list.append(user_prompt_1)
-            with open(Saving_path_result + '/prompt' + '/user_prompt_' + str(index_query_times + 1), 'w') as f:
-              f.write(user_prompt_list[-1])
-            messages = message_construct_func([user_prompt_1], [], '_w_all_dialogue_history')
-            initial_response, token_num_count = GPT_response(messages,
-                                            model_name)
-            token_num_count_list.append(token_num_count)
-
-            #print('-----------prompt------------\n' + initial_response)
-            dialogue_history += f'agent[{lift_weight_item}W]: {initial_response}\n'
-            #print(dialogue_history)
-            match = re.search(r'{.*}', initial_response, re.DOTALL)
-            if match and re.search(r'EXECUTE', initial_response):
-              response = match.group()
-              response, token_num_count_list_add = with_action_syntactic_check_func(pg_dict, response,
-                                                                                    [user_prompt_list[-1]],
-                                                                                    [],
-                                                                                    model_name,
-                                                                                    '_w_all_dialogue_history')
-              token_num_count_list = token_num_count_list + token_num_count_list_add
-              print(f'response: {response}')
-              break
-              break
-        dialogue_history_list.append(dialogue_history)
+    dialogue_history_list.append(dialogue_history)
 
     response_total_list.append(response)
     if response == 'Out of tokens':
@@ -293,6 +206,11 @@ def run_exp(Saving_path, pg_row_num, iteration_num, query_time_limit, dialogue_h
     success_failure = 'success'
   else:
     success_failure = 'failure over query time limit'
+  print(f"Initial Plan: {initial_plan}")
+  print(f"Predicted Responses: {predicted_responses}")
+  print(f"Optimized Plan: {optimized_plan}")
+  print(f"LLM Response: {response}")
+
   return user_prompt_list, response_total_list, pg_state_list, success_failure, index_query_times, token_num_count_list, Saving_path_result
 
 
